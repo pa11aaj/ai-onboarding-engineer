@@ -1,2 +1,0 @@
-Neon connection string
-postgresql://neondb_owner:npg_N7AXfQGa9Luh@ep-still-king-ayif34i0.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require
