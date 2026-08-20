@@ -1,0 +1,448 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AI Onboarding Engineer</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161922;
+    --panel-2: #1c2029;
+    --border: #2a2f3a;
+    --text: #e8eaf0;
+    --text-dim: #9aa1b2;
+    --accent: #6c8cff;
+    --accent-dim: #3d4a8a;
+    --good: #4ade80;
+    --bad: #f87171;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    height: 100%;
+  }
+  #app {
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 24px 16px 120px;
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 8px 4px 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 20px;
+  }
+  header h1 {
+    font-size: 20px;
+    margin: 0 0 4px;
+    font-weight: 600;
+  }
+  header p {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+
+  #progress {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .step-pill {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+  .step-pill.done {
+    color: var(--good);
+    border-color: var(--good);
+  }
+  .step-pill.current {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .step-pill .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  #transcript {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .msg {
+    max-width: 88%;
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    line-height: 1.5;
+    font-size: 14.5px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+  .msg.assistant {
+    align-self: flex-start;
+    background: var(--panel);
+    border: 1px solid var(--border);
+  }
+  .msg.user {
+    align-self: flex-end;
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+  }
+  .msg .role-label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+  }
+
+  #status-line {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 13px;
+    padding: 12px 0;
+  }
+  .spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #error-banner {
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid var(--bad);
+    color: var(--bad);
+    padding: 12px 14px;
+    border-radius: var(--radius);
+    font-size: 13.5px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  #error-banner.visible { display: block; }
+
+  #composer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(to top, var(--bg) 60%, transparent);
+    padding: 20px 16px 24px;
+    display: none;
+  }
+  #composer.visible { display: block; }
+  #composer-inner {
+    max-width: 780px;
+    margin: 0 auto;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+  }
+  #composer-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  #answer-input {
+    width: 100%;
+    min-height: 90px;
+    resize: vertical;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13.5px;
+    line-height: 1.5;
+  }
+  #composer-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+  }
+  button {
+    font-family: inherit;
+    font-size: 13.5px;
+    font-weight: 600;
+    padding: 9px 18px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    background: var(--accent);
+    color: #0b0d12;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  #completion {
+    display: none;
+    text-align: center;
+    padding: 32px 16px;
+    border-top: 1px solid var(--border);
+    margin-top: 24px;
+  }
+  #completion.visible { display: block; }
+  #completion h2 { margin: 0 0 8px; font-size: 18px; }
+  #completion p { color: var(--text-dim); font-size: 14px; margin: 0 0 18px; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>AI Onboarding Engineer</h1>
+      <p>A multi-agent LangGraph system that reads this project's own repo and walks you through it.</p>
+    </header>
+
+    <div id="progress"></div>
+    <div id="error-banner"></div>
+    <div id="transcript"></div>
+    <div id="status-line"></div>
+
+    <div id="completion">
+      <h2>Onboarding complete</h2>
+      <p id="completion-detail"></p>
+      <button id="restart-btn" class="secondary">Start a new session</button>
+    </div>
+  </div>
+
+  <div id="composer">
+    <div id="composer-inner">
+      <div id="composer-meta"></div>
+      <textarea id="answer-input" placeholder="Type your answer or paste your code here..."></textarea>
+      <div id="composer-actions">
+        <button id="submit-btn">Submit</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Same-origin: this page and the API are served from the same Vercel
+  // deployment, so relative paths work with no CORS configuration needed.
+  const API_BASE = "";
+
+  const els = {
+    progress: document.getElementById("progress"),
+    transcript: document.getElementById("transcript"),
+    status: document.getElementById("status-line"),
+    error: document.getElementById("error-banner"),
+    composer: document.getElementById("composer"),
+    composerMeta: document.getElementById("composer-meta"),
+    answerInput: document.getElementById("answer-input"),
+    submitBtn: document.getElementById("submit-btn"),
+    completion: document.getElementById("completion"),
+    completionDetail: document.getElementById("completion-detail"),
+    restartBtn: document.getElementById("restart-btn"),
+  };
+
+  let state = {
+    threadId: null,
+    busy: false,
+  };
+
+  function setStatus(text) {
+    els.status.innerHTML = text ? `<span class="spinner"></span>${escapeHtml(text)}` : "";
+  }
+
+  function showError(message) {
+    els.error.textContent = message;
+    els.error.classList.add("visible");
+  }
+
+  function clearError() {
+    els.error.classList.remove("visible");
+  }
+
+  function escapeHtml(str) {
+    const div = document.createElement("div");
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function renderTranscript(messages) {
+    els.transcript.innerHTML = "";
+    for (const m of messages) {
+      const div = document.createElement("div");
+      div.className = "msg " + (m.role === "assistant" ? "assistant" : "user");
+      const label = document.createElement("span");
+      label.className = "role-label";
+      label.textContent = m.role === "assistant" ? "Onboarding Engineer" : "You";
+      div.appendChild(label);
+      const body = document.createElement("div");
+      body.textContent = m.content;
+      div.appendChild(body);
+      els.transcript.appendChild(div);
+    }
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  }
+
+  function renderProgress(syllabus, currentStepIndex, completedSteps) {
+    els.progress.innerHTML = "";
+    if (!syllabus || !syllabus.steps) return;
+    const completedTitles = new Set((completedSteps || []).map((c) => c.title));
+    syllabus.steps.forEach((step, i) => {
+      const pill = document.createElement("div");
+      const isDone = completedTitles.has(step.title);
+      const isCurrent = !isDone && i === currentStepIndex;
+      pill.className = "step-pill" + (isDone ? " done" : "") + (isCurrent ? " current" : "");
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      pill.appendChild(dot);
+      pill.appendChild(document.createTextNode(`${i + 1}. ${step.title}`));
+      els.progress.appendChild(pill);
+    });
+  }
+
+  function showComposer(interrupt) {
+    els.composerMeta.textContent =
+      `Step ${interrupt.step}/${interrupt.total_steps} — attempt ${interrupt.attempt}/${interrupt.max_attempts}` +
+      (interrupt.previous_feedback ? ` · Previous feedback: ${interrupt.previous_feedback}` : "");
+    els.answerInput.value = "";
+    els.composer.classList.add("visible");
+    els.answerInput.focus();
+  }
+
+  function hideComposer() {
+    els.composer.classList.remove("visible");
+  }
+
+  function showCompletion(result) {
+    const total = (result.syllabus && result.syllabus.steps) ? result.syllabus.steps.length : 0;
+    const done = (result.completed_steps || []).length;
+    els.completionDetail.textContent =
+      done >= total && total > 0
+        ? `You finished all ${total} steps.`
+        : `Session ended after completing ${done}/${total} step(s).`;
+    els.completion.classList.add("visible");
+  }
+
+  function hideCompletion() {
+    els.completion.classList.remove("visible");
+  }
+
+  async function apiRequest(path, options) {
+    const res = await fetch(API_BASE + path, {
+      headers: { "Content-Type": "application/json" },
+      ...options,
+    });
+    let body = null;
+    try {
+      body = await res.json();
+    } catch (e) {
+      // non-JSON response
+    }
+    if (!res.ok) {
+      const detail = (body && body.detail) ? body.detail : `Request failed (${res.status})`;
+      throw new Error(detail);
+    }
+    return body;
+  }
+
+  function applyResult(result) {
+    state.threadId = result.thread_id;
+    renderTranscript(result.messages);
+    renderProgress(result.syllabus, result.current_step_index, result.completed_steps);
+
+    if (result.done) {
+      hideComposer();
+      showCompletion(result);
+    } else if (result.interrupt) {
+      hideCompletion();
+      showComposer(result.interrupt);
+    }
+  }
+
+  async function startSession() {
+    clearError();
+    hideCompletion();
+    hideComposer();
+    els.transcript.innerHTML = "";
+    els.progress.innerHTML = "";
+    state.busy = true;
+    setStatus("Designing your syllabus...");
+    try {
+      const result = await apiRequest("/api/session", { method: "POST" });
+      applyResult(result);
+    } catch (err) {
+      showError(err.message || "Could not start a session.");
+    } finally {
+      state.busy = false;
+      setStatus("");
+    }
+  }
+
+  async function submitAnswer() {
+    if (state.busy || !state.threadId) return;
+    const answer = els.answerInput.value.trim();
+    if (!answer) return;
+
+    clearError();
+    state.busy = true;
+    els.submitBtn.disabled = true;
+    setStatus("Reviewing your submission...");
+    try {
+      const result = await apiRequest(`/api/session/${encodeURIComponent(state.threadId)}/answer`, {
+        method: "POST",
+        body: JSON.stringify({ answer }),
+      });
+      applyResult(result);
+    } catch (err) {
+      showError(err.message || "Could not submit your answer.");
+    } finally {
+      state.busy = false;
+      els.submitBtn.disabled = false;
+      setStatus("");
+    }
+  }
+
+  els.submitBtn.addEventListener("click", submitAnswer);
+  els.answerInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      submitAnswer();
+    }
+  });
+  els.restartBtn.addEventListener("click", startSession);
+
+  startSession();
+})();
+</script>
+</body>
+</html>
