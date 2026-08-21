@@ -127,6 +127,108 @@
     margin-bottom: 8px;
   }
 
+  /* Work aid + quiz cards — supplementary material shown alongside the
+     current step's lab, separate from the conversational transcript. */
+  .card {
+    display: none;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 18px 4px;
+    margin-bottom: 20px;
+  }
+  .card.visible { display: block; }
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin-bottom: 14px;
+  }
+  .card-header .badge {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    background: var(--accent-dim);
+    border-radius: 999px;
+    padding: 3px 10px;
+  }
+
+  #work-aid-body {
+    white-space: pre-wrap;
+    line-height: 1.65;
+    font-size: 0.95rem;
+    color: var(--text);
+    padding-bottom: 18px;
+  }
+
+  .quiz-question {
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  .quiz-question:last-of-type {
+    border-bottom: none;
+  }
+  .quiz-question-text {
+    font-weight: 600;
+    margin-bottom: 10px;
+    line-height: 1.5;
+  }
+  .quiz-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    margin-bottom: 8px;
+    cursor: pointer;
+    font-size: 0.92rem;
+    line-height: 1.5;
+  }
+  .quiz-option:hover {
+    border-color: var(--accent);
+  }
+  .quiz-option input {
+    margin-top: 3px;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+  }
+  .quiz-option.correct {
+    border-color: var(--good);
+    background: rgba(74, 222, 128, 0.1);
+  }
+  .quiz-option.incorrect {
+    border-color: var(--bad);
+    background: rgba(248, 113, 113, 0.1);
+  }
+  .quiz-explanation {
+    display: none;
+    font-size: 0.88rem;
+    color: var(--text-dim);
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border-radius: 8px;
+    line-height: 1.5;
+  }
+  .quiz-explanation.visible { display: block; }
+  #quiz-actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding-bottom: 18px;
+  }
+  #quiz-score {
+    font-size: 0.9rem;
+    color: var(--text-dim);
+    font-weight: 600;
+  }
+
   #status-line {
     text-align: center;
     color: var(--text-dim);
@@ -251,6 +353,10 @@
     <div id="progress"></div>
     <div id="error-banner"></div>
     <div id="transcript"></div>
+
+    <div id="work-aid" class="card"></div>
+    <div id="quiz" class="card"></div>
+
     <div id="status-line"></div>
 
     <div id="completion">
@@ -290,11 +396,14 @@
     completion: document.getElementById("completion"),
     completionDetail: document.getElementById("completion-detail"),
     restartBtn: document.getElementById("restart-btn"),
+    workAid: document.getElementById("work-aid"),
+    quiz: document.getElementById("quiz"),
   };
 
   let state = {
     threadId: null,
     busy: false,
+    quizAnswers: [], // selected option index per question, -1 = unanswered
   };
 
   const APP_DEFAULT_BOTTOM_PADDING = 40; // matches #app's CSS when the composer is hidden
@@ -373,6 +482,125 @@
     });
   }
 
+  function renderWorkAid(workAid) {
+    if (!workAid) {
+      els.workAid.classList.remove("visible");
+      els.workAid.innerHTML = "";
+      return;
+    }
+    els.workAid.innerHTML = "";
+
+    const header = document.createElement("div");
+    header.className = "card-header";
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = "Work aid";
+    header.appendChild(badge);
+    header.appendChild(document.createTextNode(workAid.title));
+    els.workAid.appendChild(header);
+
+    const body = document.createElement("div");
+    body.id = "work-aid-body";
+    body.textContent = workAid.body;
+    els.workAid.appendChild(body);
+
+    els.workAid.classList.add("visible");
+  }
+
+  function renderQuiz(quiz) {
+    if (!quiz || !quiz.questions || !quiz.questions.length) {
+      els.quiz.classList.remove("visible");
+      els.quiz.innerHTML = "";
+      state.quizAnswers = [];
+      return;
+    }
+    els.quiz.innerHTML = "";
+    state.quizAnswers = quiz.questions.map(() => -1);
+
+    const header = document.createElement("div");
+    header.className = "card-header";
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = "Quick check";
+    header.appendChild(badge);
+    header.appendChild(document.createTextNode(`${quiz.questions.length} questions`));
+    els.quiz.appendChild(header);
+
+    quiz.questions.forEach((q, qi) => {
+      const qDiv = document.createElement("div");
+      qDiv.className = "quiz-question";
+
+      const qText = document.createElement("div");
+      qText.className = "quiz-question-text";
+      qText.textContent = `${qi + 1}. ${q.question}`;
+      qDiv.appendChild(qText);
+
+      q.options.forEach((opt, oi) => {
+        const label = document.createElement("label");
+        label.className = "quiz-option";
+        label.dataset.qi = qi;
+        label.dataset.oi = oi;
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = `quiz-q${qi}`;
+        input.value = oi;
+        input.addEventListener("change", () => {
+          state.quizAnswers[qi] = oi;
+        });
+        label.appendChild(input);
+        label.appendChild(document.createTextNode(opt));
+        qDiv.appendChild(label);
+      });
+
+      const explanation = document.createElement("div");
+      explanation.className = "quiz-explanation";
+      explanation.id = `quiz-explanation-${qi}`;
+      explanation.textContent = q.explanation;
+      qDiv.appendChild(explanation);
+
+      els.quiz.appendChild(qDiv);
+    });
+
+    const actions = document.createElement("div");
+    actions.id = "quiz-actions";
+    const checkBtn = document.createElement("button");
+    checkBtn.className = "secondary";
+    checkBtn.textContent = "Check answers";
+    checkBtn.addEventListener("click", () => checkQuizAnswers(quiz));
+    const score = document.createElement("span");
+    score.id = "quiz-score";
+    actions.appendChild(checkBtn);
+    actions.appendChild(score);
+    els.quiz.appendChild(actions);
+
+    els.quiz.classList.add("visible");
+  }
+
+  // Grading happens entirely client-side against the correct_index the API
+  // already returned with the quiz — deliberately no extra request/LLM call,
+  // since this is a low-stakes self-check, not a proctored assessment.
+  function checkQuizAnswers(quiz) {
+    let correctCount = 0;
+    quiz.questions.forEach((q, qi) => {
+      const selected = state.quizAnswers[qi];
+      const options = els.quiz.querySelectorAll(`.quiz-option[data-qi="${qi}"]`);
+      options.forEach((opt) => {
+        const oi = Number(opt.dataset.oi);
+        opt.classList.remove("correct", "incorrect");
+        if (oi === q.correct_index) {
+          opt.classList.add("correct");
+        } else if (oi === selected) {
+          opt.classList.add("incorrect");
+        }
+        opt.querySelector("input").disabled = true;
+      });
+      if (selected === q.correct_index) correctCount++;
+      document.getElementById(`quiz-explanation-${qi}`).classList.add("visible");
+    });
+    document.getElementById("quiz-score").textContent =
+      `${correctCount}/${quiz.questions.length} correct`;
+  }
+
   function showComposer(interrupt) {
     els.composerMeta.textContent =
       `Step ${interrupt.step}/${interrupt.total_steps} — attempt ${interrupt.attempt}/${interrupt.max_attempts}` +
@@ -424,6 +652,8 @@
     state.threadId = result.thread_id;
     renderTranscript(result.messages);
     renderProgress(result.syllabus, result.current_step_index, result.completed_steps);
+    renderWorkAid(result.work_aid);
+    renderQuiz(result.quiz);
 
     if (result.done) {
       hideComposer();
@@ -448,6 +678,8 @@
     hideComposer();
     els.transcript.innerHTML = "";
     els.progress.innerHTML = "";
+    renderWorkAid(null);
+    renderQuiz(null);
     state.busy = true;
     setStatus("Designing your syllabus...");
     try {
