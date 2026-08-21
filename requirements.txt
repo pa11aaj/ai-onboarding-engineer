@@ -1,14 +1,45 @@
+# AI Onboarding Engineer — dependencies.
+#
+#   pip install -r requirements.txt
+#
+# Grouped by purpose. The uncommented set below is the "recommended for a
+# hosted/Vercel deployment" path: OpenAI for both chat and embeddings,
+# Pinecone for retrieval, Postgres for session checkpointing. Uncomment the
+# optional groups if you need local-only alternatives (Ollama, offline
+# embeddings) or the Redis checkpointer instead.
+
+# --- Core: LangChain / LangGraph -------------------------------------------
 langchain
 langchain-core
 langchain-community
 langchain-text-splitters
 langgraph
+
+# --- Vector store: Pinecone --------------------------------------------------
 pinecone
 langchain-pinecone
+
+# --- Session checkpointer: Postgres (recommended for a serverless deploy) --
 langgraph-checkpoint-postgres
-psycopg[binary]
+psycopg[binary,pool]
+
+# --- Session checkpointer: Redis (alternative — requires Redis Stack /
+#     Redis Cloud specifically; NOT compatible with Upstash) ---------------
+# langgraph-checkpoint-redis
+
+# --- LLM providers -----------------------------------------------------------
 langchain-openai
+# langchain-anthropic
+# langchain-ollama   # local-only; needs a reachable Ollama daemon
+
+# --- Embeddings: local/offline alternative to OpenAI's embeddings API ------
+# langchain-huggingface
+# sentence-transformers
+
+# --- Web backend (server.py) ------------------------------------------------
 fastapi
 uvicorn[standard]
+
+# --- Utilities ---------------------------------------------------------------
 python-dotenv
 pydantic
