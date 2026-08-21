@@ -4,8 +4,11 @@ ingest.py — Data ingestion pipeline for the AI Onboarding Engineer.
 
 Scans a local repository for Markdown (.md) and Python (.py) files, splits
 them into semantically-aware chunks, generates vector embeddings (locally
-via sentence-transformers, or remotely via the OpenAI API), and persists
-everything to a local ChromaDB collection for later retrieval.
+via sentence-transformers, or remotely via the OpenAI API), and upserts
+everything into a Pinecone serverless index for later retrieval. Pinecone
+(rather than a local ChromaDB directory) is used specifically so the
+retrieval side has no local-disk dependency, which is what lets the agent
+backend run as a stateless/serverless deployment (e.g. behind Vercel).
 
 Usage
 -----
@@ -15,13 +18,17 @@ Usage
     # Ingest a specific repo using OpenAI embeddings (requires OPENAI_API_KEY)
     python ingest.py --source-dir /path/to/repo --embedding-provider openai
 
-    # Wipe and rebuild the collection from scratch
+    # Wipe and rebuild the namespace from scratch
     python ingest.py --source-dir . --reset
+
+Required environment variables (see agents.py's Pinecone section for the
+full list): PINECONE_API_KEY, and optionally PINECONE_INDEX_NAME,
+PINECONE_NAMESPACE, PINECONE_CLOUD, PINECONE_REGION.
 
 Requirements
 ------------
     pip install langchain langchain-community langchain-text-splitters \
-                langchain-chroma chromadb python-dotenv
+                pinecone langchain-pinecone python-dotenv
     # For local embeddings:
     pip install langchain-huggingface sentence-transformers
     # For OpenAI embeddings:
@@ -35,6 +42,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -43,13 +51,13 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_text_splitters import Language, RecursiveCharacterTextSplitter
 
+import agents
+
 # ---------------------------------------------------------------------------
 # Configuration defaults
 # ---------------------------------------------------------------------------
 
 DEFAULT_SOURCE_DIR = "."
-DEFAULT_PERSIST_DIR = "./data/chroma_db"
-DEFAULT_COLLECTION_NAME = "onboarding_docs"
 DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 200
 DEFAULT_BATCH_SIZE = 100
@@ -63,7 +71,7 @@ TARGET_EXTENSIONS = {
 }
 
 # Directories we never want to walk into (VCS metadata, virtualenvs, caches,
-# build artifacts, and the vector store's own persistence directory).
+# and build artifacts).
 EXCLUDED_DIR_NAMES = {
     ".git",
     ".hg",
@@ -80,8 +88,6 @@ EXCLUDED_DIR_NAMES = {
     "build",
     ".idea",
     ".vscode",
-    "chroma_db",
-    ".chroma",
 }
 
 logger = logging.getLogger("ingest")
@@ -325,66 +331,8 @@ def get_embedding_function(provider: str, model_name: Optional[str]) -> Embeddin
 
 
 # ---------------------------------------------------------------------------
-# 5. Vector store
+# 5. Vector store (Pinecone — see agents.py for the connection code)
 # ---------------------------------------------------------------------------
-
-def build_vector_store(
-    persist_directory: Path,
-    collection_name: str,
-    embedding_function: Embeddings,
-    reset: bool,
-):
-    """
-    Create (or open) a persistent Chroma collection.
-
-    Raises:
-        OSError: if the persist directory can't be created/written to.
-        RuntimeError: if the Chroma client or collection can't be initialized.
-    """
-    try:
-        persist_directory.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise OSError(
-            f"Could not create/access persist directory '{persist_directory}': {exc}"
-        ) from exc
-
-    try:
-        import chromadb
-        from chromadb.config import Settings
-        from langchain_chroma import Chroma
-    except ImportError as exc:
-        raise ImportError(
-            "ChromaDB integration requires 'chromadb' and 'langchain-chroma'. "
-            "Install them with:\n    pip install chromadb langchain-chroma"
-        ) from exc
-
-    try:
-        client = chromadb.PersistentClient(
-            path=str(persist_directory),
-            settings=Settings(anonymized_telemetry=False),
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Failed to initialize ChromaDB client at '{persist_directory}': {exc}") from exc
-
-    if reset:
-        try:
-            client.delete_collection(name=collection_name)
-            logger.info("Existing collection '%s' deleted (--reset).", collection_name)
-        except Exception:
-            # Collection may simply not exist yet — that's fine.
-            logger.debug("No existing collection '%s' to delete.", collection_name)
-
-    try:
-        vector_store = Chroma(
-            client=client,
-            collection_name=collection_name,
-            embedding_function=embedding_function,
-        )
-    except Exception as exc:
-        raise RuntimeError(f"Failed to open Chroma collection '{collection_name}': {exc}") from exc
-
-    return vector_store
-
 
 def add_documents_with_retry(
     vector_store,
@@ -394,16 +342,21 @@ def add_documents_with_retry(
     backoff_base: float,
 ) -> int:
     """
-    Add chunks to the vector store in batches, retrying transient failures
-    (network hiccups, rate limits, temporary embedding-API/connection
-    errors) with exponential backoff. Raises RuntimeError if a batch still
-    fails after all retries are exhausted.
+    Upsert chunks into the vector store in batches, retrying transient
+    failures (network hiccups, rate limits, temporary embedding-API/Pinecone
+    connection errors) with exponential backoff. Raises RuntimeError if a
+    batch still fails after all retries are exhausted.
+
+    Each chunk is given an explicit UUID as its Pinecone vector ID (rather
+    than relying on an auto-generated one), matching Pinecone's documented
+    LangChain integration pattern.
     """
     total = len(chunks)
     added = 0
 
     for start in range(0, total, batch_size):
         batch = chunks[start : start + batch_size]
+        batch_ids = [str(uuid.uuid4()) for _ in batch]
         batch_num = start // batch_size + 1
         total_batches = (total + batch_size - 1) // batch_size
 
@@ -411,10 +364,10 @@ def add_documents_with_retry(
         while True:
             attempt += 1
             try:
-                vector_store.add_documents(batch)
+                vector_store.add_documents(batch, ids=batch_ids)
                 added += len(batch)
                 logger.info(
-                    "Embedded and stored batch %d/%d (%d chunks, %d/%d total).",
+                    "Embedded and upserted batch %d/%d (%d chunks, %d/%d total).",
                     batch_num, total_batches, len(batch), added, total,
                 )
                 break
@@ -422,7 +375,7 @@ def add_documents_with_retry(
                 if attempt >= max_retries:
                     raise RuntimeError(
                         f"Batch {batch_num}/{total_batches} failed after {max_retries} attempts "
-                        f"(likely an embedding API / connection issue): {exc}"
+                        f"(likely an embedding API / Pinecone connection issue): {exc}"
                     ) from exc
 
                 wait = backoff_base * (2 ** (attempt - 1))
@@ -441,19 +394,25 @@ def add_documents_with_retry(
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Ingest Markdown and Python files from a repo into a local ChromaDB store.",
+        description="Ingest Markdown and Python files from a repo into a Pinecone serverless index.",
     )
     parser.add_argument(
         "--source-dir", type=str, default=DEFAULT_SOURCE_DIR,
         help=f"Directory to scan recursively for .md/.py files (default: {DEFAULT_SOURCE_DIR})",
     )
     parser.add_argument(
-        "--persist-dir", type=str, default=DEFAULT_PERSIST_DIR,
-        help=f"Directory where the ChromaDB collection is persisted (default: {DEFAULT_PERSIST_DIR})",
+        "--index-name", type=str, default=None,
+        help=(
+            "Pinecone index name (lowercase alphanumeric + hyphens only). Defaults to "
+            f"PINECONE_INDEX_NAME or '{agents.DEFAULT_PINECONE_INDEX_NAME}'."
+        ),
     )
     parser.add_argument(
-        "--collection-name", type=str, default=DEFAULT_COLLECTION_NAME,
-        help=f"Name of the Chroma collection (default: {DEFAULT_COLLECTION_NAME})",
+        "--namespace", type=str, default=None,
+        help=(
+            "Pinecone namespace within the index (acts like a collection name). Defaults to "
+            f"PINECONE_NAMESPACE or '{agents.DEFAULT_NAMESPACE}'."
+        ),
     )
     parser.add_argument(
         "--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
@@ -481,7 +440,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--reset", action="store_true",
-        help="Delete any existing collection with this name before ingesting.",
+        help="Delete all vectors in this namespace before ingesting.",
     )
     parser.add_argument(
         "--verbose", action="store_true",
@@ -505,7 +464,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     start_time = time.monotonic()
     source_dir = Path(args.source_dir).expanduser().resolve()
-    persist_dir = Path(args.persist_dir).expanduser().resolve()
 
     logger.info("Scanning '%s' for .md/.py files...", source_dir)
     try:
@@ -538,14 +496,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("Could not initialize embedding function: %s", exc)
         return 1
 
+    if args.reset:
+        try:
+            agents.reset_namespace(index_name=args.index_name, namespace=args.namespace)
+        except (ImportError, EnvironmentError, agents.AgentError) as exc:
+            logger.error("Could not reset namespace: %s", exc)
+            return 1
+
     try:
-        vector_store = build_vector_store(
-            persist_directory=persist_dir,
-            collection_name=args.collection_name,
-            embedding_function=embedding_function,
-            reset=args.reset,
+        vector_store = agents.get_vector_store(
+            embedding_function,
+            index_name=args.index_name,
+            namespace=args.namespace,
+            create_if_missing=True,
         )
-    except (ImportError, OSError, RuntimeError) as exc:
+    except (ImportError, EnvironmentError, ValueError, agents.AgentError) as exc:
         logger.error("Could not initialize vector store: %s", exc)
         return 1
 
@@ -564,14 +529,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     except RuntimeError as exc:
         logger.error(
             "Ingestion aborted while embedding chunks — this usually means the embedding "
-            "API/service is unreachable or misconfigured: %s", exc,
+            "API/service or Pinecone is unreachable or misconfigured: %s", exc,
         )
         return 1
 
     elapsed = time.monotonic() - start_time
+    index_name = args.index_name or os.environ.get("PINECONE_INDEX_NAME", agents.DEFAULT_PINECONE_INDEX_NAME)
+    namespace = args.namespace or os.environ.get("PINECONE_NAMESPACE", agents.DEFAULT_NAMESPACE)
     logger.info(
-        "Done. Ingested %d chunk(s) from %d file(s) into collection '%s' at '%s' in %.1fs.",
-        added, len(documents), args.collection_name, persist_dir, elapsed,
+        "Done. Ingested %d chunk(s) from %d file(s) into Pinecone index '%s' namespace '%s' in %.1fs.",
+        added, len(documents), index_name, namespace, elapsed,
     )
     return 0
 

@@ -38,16 +38,20 @@ import re
 import sqlite3
 import time
 from pathlib import Path
-from typing import Annotated, List, Optional, Tuple, Type, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Annotated, List, Optional, Tuple, Type, TypedDict, TypeVar
 
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+if TYPE_CHECKING:
+    # Only needed for type checkers — see get_checkpointer() for why the
+    # real import is deferred to runtime instead of happening here.
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
 logger = logging.getLogger("agents")
 
@@ -241,13 +245,35 @@ def get_chat_model(provider: str, model_name: Optional[str] = None, temperature:
 # Checkpointer
 # ---------------------------------------------------------------------------
 
-def get_checkpointer(db_path: Path) -> Tuple[SqliteSaver, sqlite3.Connection]:
+def get_checkpointer(db_path: Path) -> Tuple["SqliteSaver", sqlite3.Connection]:
     """
     Build a SQLite-backed checkpointer so graph state — including any
     in-progress human-in-the-loop interrupt — is durable across process
     restarts. Returns both the checkpointer and the raw connection so the
     caller can close the connection on shutdown.
+
+    Only used by main.py's local CLI path — the web deployment (server.py /
+    agent_service.py) uses the Postgres/Redis checkpointer instead, so this
+    import is deferred to runtime rather than happening at module load time:
+    'langgraph-checkpoint-sqlite' is deliberately NOT in requirements.txt
+    (it would be dead weight in the Vercel bundle), so importing it
+    unconditionally at the top of this file would break the entire module
+    — and therefore the whole deployed app — the moment that package isn't
+    installed, even though nothing in the web path ever calls this function.
+
+    Raises:
+        ImportError: if 'langgraph-checkpoint-sqlite' isn't installed.
     """
+    try:
+        from langgraph.checkpoint.sqlite import SqliteSaver
+    except ImportError as exc:
+        raise ImportError(
+            "The local CLI checkpointer requires the 'langgraph-checkpoint-sqlite' package. "
+            "Install with:\n    pip install langgraph-checkpoint-sqlite\n"
+            "(This is intentionally NOT in requirements.txt, since the web deployment uses "
+            "the Postgres/Redis checkpointer instead and doesn't need it.)"
+        ) from exc
+
     try:
         db_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
