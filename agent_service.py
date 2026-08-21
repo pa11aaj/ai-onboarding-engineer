@@ -208,6 +208,8 @@ def _format_result(thread_id: str, result: dict) -> dict:
         "syllabus": result.get("syllabus"),
         "current_step_index": result.get("current_step_index", 0),
         "completed_steps": result.get("completed_steps", []),
+        "quiz": result.get("quiz"),
+        "work_aid": result.get("work_aid"),
     }
 
 

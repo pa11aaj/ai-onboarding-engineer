@@ -5,13 +5,19 @@ multi-agent workflow.
 
 Three nodes are wired into a single stateful graph:
 
-    1. syllabus_designer_node — queries the Pinecone vector store for
-       repository context and produces a structured 3-step learning outline.
+    1. syllabus_designer_node — queries the Pinecone vector store for source
+       context (a repository, docs site, or any ingested content) and
+       produces a structured 3-step learning outline, ordered from true
+       fundamentals to more advanced material. The learner is assumed to
+       have NO access to any repository or file system — every step must
+       be self-contained, teachable through text alone.
     2. lab_generator_node     — turns the current syllabus step into a
-       concrete, hands-on coding lab grounded in the retrieved repo context.
+       concrete, hands-on exercise grounded in the retrieved context, with
+       any needed code/reference snippets embedded directly in the text
+       rather than referencing files the learner can't open.
     3. reviewer_node          — a human-in-the-loop node. It pauses the graph
        (via LangGraph's `interrupt`) to collect the learner's submission,
-       evaluates it against the lab's success criteria and the repository
+       evaluates it against the lab's success criteria and the source
        context, and routes the graph to a retry, the next step, completion,
        or escalation to a human mentor.
 
@@ -30,6 +36,7 @@ a hosting provider's dashboard (e.g. Vercel's Project Settings).
 
 from __future__ import annotations
 
+import concurrent.futures
 import functools
 import json
 import logging
@@ -76,13 +83,13 @@ class LearningStep(BaseModel):
         description="What the developer should understand or be able to do after this step."
     )
     key_concepts: List[str] = Field(
-        description="3-5 specific concepts, modules, or files from the repository this step focuses on."
+        description="3-5 specific terms, concepts, or topics from the source material this step focuses on."
     )
 
 
 class Syllabus(BaseModel):
     project_summary: str = Field(
-        description="2-4 sentence summary of what this repository/project does, grounded in the retrieved context."
+        description="2-4 sentence summary of what this repository/project/documentation set covers, grounded in the retrieved context."
     )
     steps: List[LearningStep] = Field(
         description="Exactly 3 progressive learning steps, from foundational to advanced."
@@ -99,9 +106,20 @@ class Syllabus(BaseModel):
 class Lab(BaseModel):
     title: str = Field(description="Short title for this hands-on lab.")
     lesson: str = Field(
-        description="1-3 paragraph explanation of the concept, grounded in the repo context, written for a new developer."
+        description=(
+            "1-3 paragraph, self-contained explanation of the concept, written for someone "
+            "completely new to it. Must fully explain everything the learner needs — they have "
+            "no access to any repository, file, or external material beyond this text."
+        )
     )
-    challenge: str = Field(description="The hands-on coding challenge or task instructions.")
+    challenge: str = Field(
+        description=(
+            "The hands-on challenge or task instructions. Must be completable using only the "
+            "lesson text above and the learner's own general knowledge — never instruct the "
+            "learner to open, find, or navigate to a specific file, path, or repository, since "
+            "they have no access to one."
+        )
+    )
     starter_code: str = Field(
         default="", description="Optional starter code/skeleton for the challenge; empty string if not applicable."
     )
@@ -110,10 +128,61 @@ class Lab(BaseModel):
     )
 
 
+NUM_QUIZ_QUESTIONS = 3
+
+
+class QuizQuestion(BaseModel):
+    question: str = Field(description="A single multiple-choice question testing understanding of this step's material.")
+    options: List[str] = Field(description="Exactly 4 answer options, in the order they should be displayed.")
+    correct_index: int = Field(description="The 0-based index into `options` of the single correct answer.")
+    explanation: str = Field(
+        description="1-2 sentence explanation of why the correct answer is correct, shown to the learner after they answer."
+    )
+
+    @field_validator("options")
+    @classmethod
+    def must_have_four_options(cls, value: List[str]) -> List[str]:
+        if len(value) != 4:
+            raise ValueError(f"Each quiz question must have exactly 4 options, got {len(value)}.")
+        return value
+
+    @field_validator("correct_index")
+    @classmethod
+    def correct_index_in_range(cls, value: int) -> int:
+        if not (0 <= value <= 3):
+            raise ValueError(f"correct_index must be between 0 and 3, got {value}.")
+        return value
+
+
+class Quiz(BaseModel):
+    questions: List[QuizQuestion] = Field(
+        description=f"Exactly {NUM_QUIZ_QUESTIONS} multiple-choice questions covering this step's material."
+    )
+
+    @field_validator("questions")
+    @classmethod
+    def must_have_n_questions(cls, value: List[QuizQuestion]) -> List[QuizQuestion]:
+        if len(value) != NUM_QUIZ_QUESTIONS:
+            raise ValueError(f"Quiz must contain exactly {NUM_QUIZ_QUESTIONS} questions, got {len(value)}.")
+        return value
+
+
+class WorkAid(BaseModel):
+    title: str = Field(description="Short title for this reference/cheat-sheet.")
+    body: str = Field(
+        description=(
+            "A concise, scannable reference for this step's topic — key terms and definitions, "
+            "important syntax, or a short checklist, whichever fits best. Plain text with short "
+            "lines and clear structure (e.g. one 'term: definition' per line); this is displayed "
+            "as-is, not rendered as markdown, so avoid markdown syntax like '#' or '**'."
+        )
+    )
+
+
 class ReviewVerdict(BaseModel):
     passed: bool = Field(description="Whether the submission meets the lab's success criteria.")
     feedback: str = Field(
-        description="Specific, constructive feedback for the learner, referencing the success criteria and repo context."
+        description="Specific, constructive feedback for the learner, referencing the success criteria and the source material."
     )
     unmet_criteria: List[str] = Field(
         default_factory=list, description="Which success criteria were not satisfied; empty if passed."
@@ -132,6 +201,8 @@ class OnboardingState(TypedDict):
     syllabus: Optional[dict]
     current_step_index: int
     lab: Optional[dict]
+    quiz: Optional[dict]
+    work_aid: Optional[dict]
     lab_context: str
     attempt_count: int
     review_passed: Optional[bool]
@@ -147,6 +218,8 @@ def initial_state() -> OnboardingState:
         "syllabus": None,
         "current_step_index": 0,
         "lab": None,
+        "quiz": None,
+        "work_aid": None,
         "lab_context": "",
         "attempt_count": 0,
         "review_passed": None,
@@ -664,31 +737,40 @@ def retrieve_context(vector_store, queries: List[str], k_per_query: int = 4, max
 # Node 1 — Syllabus Designer Agent
 # ---------------------------------------------------------------------------
 
-GENERAL_REPO_QUERIES = [
-    "project overview, purpose, and goals",
-    "high level architecture and main components",
-    "how to set up, install, and run the project",
-    "key modules, packages, and their responsibilities",
+GENERAL_TOPIC_QUERIES = [
+    "overview, purpose, and what this is used for",
+    "core concepts, terminology, and how the pieces fit together",
+    "getting started — the simplest possible first step",
+    "key features and capabilities",
 ]
 
 
 def syllabus_designer_node(state: OnboardingState, *, vector_store, llm) -> dict:
-    logger.info("Syllabus Designer: retrieving repository context...")
-    context = retrieve_context(vector_store, GENERAL_REPO_QUERIES, k_per_query=4, max_chars=7000)
+    logger.info("Syllabus Designer: retrieving source context...")
+    context = retrieve_context(vector_store, GENERAL_TOPIC_QUERIES, k_per_query=4, max_chars=7000)
 
     system_prompt = (
         "You are the Syllabus Designer for an AI Onboarding Engineer. Your job is to study "
-        "excerpts from a software repository's documentation and source code, then design a "
-        "focused, progressive 3-step learning path for a brand-new developer joining the "
-        "project. Ground every step strictly in the actual repository content provided — do "
-        "not invent files, modules, or concepts that aren't supported by the context. Each "
-        "step should build on the previous one, moving from foundational understanding to "
-        "hands-on contribution."
+        "excerpts from source material (this could be a software repository's docs and code, "
+        "or a documentation/reference site — treat both the same way) and design a focused, "
+        "progressive 3-step learning path for someone completely new to this subject.\n\n"
+        "Two hard rules:\n"
+        "1. The learner has NO access to any repository, file system, or external material — "
+        "only this conversation. Never assume they can open, browse, or navigate to anything. "
+        "Every concept must be teachable through text alone.\n"
+        "2. Start from true fundamentals. Step 1 must be genuinely introductory — assume the "
+        "learner has never encountered this subject before, and needs the most basic building "
+        "blocks and vocabulary before anything else. Do not open with advanced, niche, or "
+        "deep-implementation topics just because they appeared prominently in the retrieved "
+        "context. Step 2 builds on step 1, and step 3 is the most advanced of the three — but "
+        "'advanced' here still means appropriate early material, not expert-level depth.\n\n"
+        "Ground every step strictly in the actual context provided — do not invent concepts "
+        "that aren't supported by it."
     )
     human_prompt = (
-        f"Repository context (retrieved from the project's docs and source code):\n\n{context}\n\n"
-        "Design exactly 3 learning steps for a new developer onboarding onto this repository. "
-        "Respond in the required structured format."
+        f"Source context (retrieved from the documentation/repository):\n\n{context}\n\n"
+        "Design exactly 3 learning steps, ordered from most basic to least basic, for someone "
+        "brand new to this subject. Respond in the required structured format."
     )
 
     syllabus = invoke_structured(llm, system_prompt, human_prompt, Syllabus)
@@ -728,20 +810,70 @@ def lab_generator_node(state: OnboardingState, *, vector_store, llm) -> dict:
 
     system_prompt = (
         "You are the Lab Generator for an AI Onboarding Engineer. Given one step of a "
-        "learner's onboarding syllabus and grounded excerpts from the actual repository, "
-        "create a concrete, hands-on coding lab. The lab must be answerable using only the "
-        "provided repository context — do not require knowledge the learner couldn't get "
-        "from the repo. Include clear, specific, checkable success criteria."
+        "learner's onboarding syllabus and grounded excerpts from the source material, "
+        "create a concrete, hands-on practice exercise appropriate for someone at this stage "
+        "of the syllabus — early steps should be simple and confidence-building, not deep or "
+        "advanced. The learner has NO access to any repository or file system: never tell "
+        "them to open, find, or navigate to a specific file or path. Everything they need — "
+        "any code, config, or reference snippet — must be written directly into the lesson or "
+        "challenge text itself. The exercise must be completable using only what you provide "
+        "here and general knowledge — do not require anything the learner couldn't get from "
+        "this conversation. Include clear, specific, checkable success criteria."
     )
     human_prompt = (
         f"Learning step {idx + 1} of {len(steps)}: {step['title']}\n"
         f"Objective: {step['objective']}\n"
         f"Key concepts to cover: {', '.join(step.get('key_concepts', [])) or 'N/A'}\n\n"
-        f"Relevant repository context:\n\n{lab_context}\n\n"
-        "Create a hands-on lab for this step. Respond in the required structured format."
+        f"Relevant source context:\n\n{lab_context}\n\n"
+        "Create a hands-on exercise for this step. Respond in the required structured format."
     )
 
-    lab = invoke_structured(llm, system_prompt, human_prompt, Lab)
+    quiz_system_prompt = (
+        "You are the Quiz Generator for an AI Onboarding Engineer. Given one step of a "
+        "learner's onboarding syllabus and grounded excerpts from the source material, write "
+        f"exactly {NUM_QUIZ_QUESTIONS} multiple-choice questions (4 options each, exactly one "
+        "correct) that check understanding of this step's material. Questions must be "
+        "answerable purely from the provided context and general reasoning — never assume "
+        "access to any repository or file. Keep each question clear and unambiguous, with "
+        "only one defensibly correct option; wrong options should be plausible, not silly."
+    )
+    quiz_human_prompt = (
+        f"Learning step {idx + 1} of {len(steps)}: {step['title']}\n"
+        f"Objective: {step['objective']}\n"
+        f"Key concepts to cover: {', '.join(step.get('key_concepts', [])) or 'N/A'}\n\n"
+        f"Relevant source context:\n\n{lab_context}\n\n"
+        "Write the quiz. Respond in the required structured format."
+    )
+
+    workaid_system_prompt = (
+        "You are the Work Aid Generator for an AI Onboarding Engineer. Given one step of a "
+        "learner's onboarding syllabus and grounded excerpts from the source material, write "
+        "a short, scannable reference sheet the learner can consult while working through this "
+        "step — key terms and their definitions, important syntax, or a short checklist, "
+        "whichever best fits this step's topic. Keep it concise; this is a quick-reference "
+        "companion, not a restatement of the full lesson."
+    )
+    workaid_human_prompt = (
+        f"Learning step {idx + 1} of {len(steps)}: {step['title']}\n"
+        f"Key concepts to cover: {', '.join(step.get('key_concepts', [])) or 'N/A'}\n\n"
+        f"Relevant source context:\n\n{lab_context}\n\n"
+        "Write the work aid. Respond in the required structured format."
+    )
+
+    # The lab, quiz, and work aid are three independent LLM calls grounded in
+    # the same retrieved context — running them concurrently instead of
+    # sequentially keeps this node's wall-clock time close to that of a
+    # single call rather than the sum of three, which matters for staying
+    # under the deployment's function timeout.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        lab_future = executor.submit(invoke_structured, llm, system_prompt, human_prompt, Lab)
+        quiz_future = executor.submit(invoke_structured, llm, quiz_system_prompt, quiz_human_prompt, Quiz)
+        workaid_future = executor.submit(
+            invoke_structured, llm, workaid_system_prompt, workaid_human_prompt, WorkAid
+        )
+        lab = lab_future.result()
+        quiz = quiz_future.result()
+        work_aid = workaid_future.result()
 
     content = (
         f"Step {idx + 1}/{len(steps)}: {lab.title}\n\n"
@@ -754,6 +886,8 @@ def lab_generator_node(state: OnboardingState, *, vector_store, llm) -> dict:
 
     return {
         "lab": lab.model_dump(),
+        "quiz": quiz.model_dump(),
+        "work_aid": work_aid.model_dump(),
         "lab_context": lab_context,
         "attempt_count": 0,
         "review_passed": None,
@@ -799,16 +933,19 @@ def reviewer_node(state: OnboardingState, *, vector_store, llm) -> dict:
 
     system_prompt = (
         "You are the Reviewer Agent for an AI Onboarding Engineer. You evaluate a learner's "
-        "submission against the repository's actual code and documentation, and against the "
-        "lab's stated success criteria. Be strict but fair and specific: cite what was correct "
-        "and what was missing or wrong, and reference the repository context when relevant. Do "
-        "not pass a submission that fails to meet the success criteria, even if it is well-written."
+        "submission against the source material and against the lab's stated success "
+        "criteria. Be strict but fair and specific: cite what was correct and what was "
+        "missing or wrong, and reference the source context when relevant. Do not pass a "
+        "submission that fails to meet the success criteria, even if it is well-written. "
+        "Remember the learner has no access to any repository or file system — only what was "
+        "given to them in the lesson and challenge text — so never fault them for not knowing "
+        "something that wasn't provided to them."
     )
     human_prompt = (
         f"Lab: {lab['title']}\n"
         f"Challenge given to the learner:\n{lab['challenge']}\n\n"
         "Success criteria:\n" + "\n".join(f"- {c}" for c in lab["success_criteria"]) + "\n\n"
-        f"Relevant repository context to check the submission against:\n\n{state.get('lab_context', '')}\n\n"
+        f"Relevant source context to check the submission against:\n\n{state.get('lab_context', '')}\n\n"
         f"Learner's submission:\n{user_response or '(no response submitted)'}\n\n"
         "Evaluate this submission. Respond in the required structured format."
     )
