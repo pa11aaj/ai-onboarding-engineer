@@ -101,11 +101,12 @@ def _build_checkpointer(stack: ExitStack):
     if backend == "postgres":
         try:
             from langgraph.checkpoint.postgres import PostgresSaver
+            from psycopg_pool import ConnectionPool
         except ImportError as exc:
             raise ImportError(
                 "CHECKPOINTER=postgres requires the 'langgraph-checkpoint-postgres' package "
-                "(and a driver, e.g. 'psycopg[binary]'). Install with:\n"
-                "    pip install langgraph-checkpoint-postgres 'psycopg[binary]'"
+                "and a driver with pooling support. Install with:\n"
+                "    pip install langgraph-checkpoint-postgres 'psycopg[binary,pool]'"
             ) from exc
 
         db_url = os.environ.get("DATABASE_URL") or os.environ.get("POSTGRES_URL")
@@ -116,9 +117,34 @@ def _build_checkpointer(stack: ExitStack):
                 "environment variables (e.g. Vercel Project Settings) or your local .env file."
             )
 
-        checkpointer = stack.enter_context(PostgresSaver.from_conn_string(db_url))
+        # A single connection opened once at startup (PostgresSaver.from_conn_string)
+        # doesn't survive a serverless function sitting idle between requests: Neon
+        # (like most managed Postgres) closes idle connections server-side after a
+        # few minutes, and the *next* request then fails with
+        # "psycopg.OperationalError: the connection is closed" the moment this
+        # process tries to reuse it. A ConnectionPool health-checks the connection
+        # it hands out and transparently opens a fresh one if the old one died, so
+        # it survives exactly that kind of idle gap. min_size=0 so a cold start
+        # doesn't block on opening a connection before it's needed; max_size kept
+        # modest since each function instance gets its own pool and Neon's direct
+        # (non-pooled) connection limit is finite — use Neon's "-pooler" connection
+        # string for DATABASE_URL so PgBouncer absorbs the rest.
+        connection_kwargs = {
+            "autocommit": True,
+            "prepare_threshold": 0,  # required when DATABASE_URL routes through PgBouncer in transaction mode
+        }
+        pool = stack.enter_context(
+            ConnectionPool(
+                conninfo=db_url,
+                min_size=0,
+                max_size=5,
+                kwargs=connection_kwargs,
+                check=ConnectionPool.check_connection,
+            )
+        )
+        checkpointer = PostgresSaver(pool)
         checkpointer.setup()  # idempotent: creates the checkpoint tables if they don't exist yet
-        logger.info("Using Postgres checkpointer for session state.")
+        logger.info("Using Postgres checkpointer for session state (pooled).")
         return checkpointer
 
     if backend == "redis":
