@@ -114,17 +114,24 @@ class Lab(BaseModel):
     )
     challenge: str = Field(
         description=(
-            "The hands-on challenge or task instructions. Must be completable using only the "
-            "lesson text above and the learner's own general knowledge — never instruct the "
-            "learner to open, find, or navigate to a specific file, path, or repository, since "
-            "they have no access to one."
+            "A single, focused question directly testing something explicitly covered in the "
+            "lesson text above — answerable in a few sentences typed into a plain text box. "
+            "Must be completable using only the lesson text and the learner's own general "
+            "knowledge. NEVER ask for a diagram, drawing, image, chart, or anything visual — "
+            "the learner can only submit plain text. NEVER ask for a long essay, a multi-file "
+            "project, or anything requiring more than a short paragraph or a few lines of code. "
+            "Never instruct the learner to open, find, or navigate to a specific file, path, or "
+            "repository, since they have no access to one."
         )
     )
     starter_code: str = Field(
         default="", description="Optional starter code/skeleton for the challenge; empty string if not applicable."
     )
     success_criteria: List[str] = Field(
-        description="3-5 concrete, checkable criteria a correct solution must satisfy."
+        description=(
+            "3-5 concrete, checkable criteria a correct short answer must satisfy — scaled to "
+            "a response of a few sentences or a short snippet, not a long or multi-part answer."
+        )
     )
 
 
@@ -810,15 +817,23 @@ def lab_generator_node(state: OnboardingState, *, vector_store, llm) -> dict:
 
     system_prompt = (
         "You are the Lab Generator for an AI Onboarding Engineer. Given one step of a "
-        "learner's onboarding syllabus and grounded excerpts from the source material, "
-        "create a concrete, hands-on practice exercise appropriate for someone at this stage "
-        "of the syllabus — early steps should be simple and confidence-building, not deep or "
-        "advanced. The learner has NO access to any repository or file system: never tell "
-        "them to open, find, or navigate to a specific file or path. Everything they need — "
-        "any code, config, or reference snippet — must be written directly into the lesson or "
-        "challenge text itself. The exercise must be completable using only what you provide "
-        "here and general knowledge — do not require anything the learner couldn't get from "
-        "this conversation. Include clear, specific, checkable success criteria."
+        "learner's onboarding syllabus and grounded excerpts from the source material, write "
+        "the lesson text, then a single short-answer question that directly tests something "
+        "the lesson just covered.\n\n"
+        "Hard constraints on the challenge question:\n"
+        "- It must be answerable by typing a few sentences (or a short code snippet) into a "
+        "plain text box — that is the ONLY way the learner can respond, so never ask for "
+        "anything else.\n"
+        "- NEVER ask the learner to draw, sketch, diagram, or produce anything visual — they "
+        "have no way to submit an image.\n"
+        "- NEVER ask for a long essay, a multi-part answer, or a multi-file project. One "
+        "focused question, one short answer.\n"
+        "- It must test material from the lesson you just wrote, not something tangential.\n\n"
+        "The learner has NO access to any repository or file system: never tell them to open, "
+        "find, or navigate to a specific file or path. Everything they need — any code, "
+        "config, or reference snippet — must be written directly into the lesson or challenge "
+        "text itself. Early steps should be simple and confidence-building, not deep or "
+        "advanced. Include clear, specific success criteria appropriate for a short answer."
     )
     human_prompt = (
         f"Learning step {idx + 1} of {len(steps)}: {step['title']}\n"

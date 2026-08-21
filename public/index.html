@@ -128,23 +128,30 @@
   }
 
   /* Work aid + quiz cards — supplementary material shown alongside the
-     current step's lab, separate from the conversational transcript. */
+     current step's lab, separate from the conversational transcript. Sized
+     and aligned to match the message bubbles above (max-width: 88%,
+     left-aligned) so every "box" on the page reads as the same family of
+     component instead of the cards looking oversized next to the chat. */
   .card {
     display: none;
+    align-self: flex-start;
+    width: 100%;
+    max-width: 88%;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 18px 18px 4px;
-    margin-bottom: 20px;
+    padding: 14px 16px;
+    margin-bottom: 14px;
+    box-sizing: border-box;
   }
   .card.visible { display: block; }
   .card-header {
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 1.05rem;
+    font-size: 1rem;
     font-weight: 700;
-    margin-bottom: 14px;
+    margin-bottom: 12px;
   }
   .card-header .badge {
     font-size: 0.7rem;
@@ -156,13 +163,27 @@
     border-radius: 999px;
     padding: 3px 10px;
   }
+  .card-header .header-spacer {
+    flex: 1;
+  }
+  .card-header .download-btn {
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 6px 12px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+  }
+  .card-header .download-btn:hover {
+    border-color: var(--accent);
+    color: var(--text);
+  }
 
   #work-aid-body {
     white-space: pre-wrap;
-    line-height: 1.65;
-    font-size: 0.95rem;
+    line-height: 1.6;
+    font-size: 0.92rem;
     color: var(--text);
-    padding-bottom: 18px;
   }
 
   .quiz-question {
@@ -221,7 +242,6 @@
     display: flex;
     align-items: center;
     gap: 14px;
-    padding-bottom: 18px;
   }
   #quiz-score {
     font-size: 0.9rem;
@@ -482,6 +502,25 @@
     });
   }
 
+  function downloadWorkAid(workAid) {
+    const text = `${workAid.title}\n${"=".repeat(workAid.title.length)}\n\n${workAid.body}\n`;
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const filename =
+      (workAid.title || "work-aid")
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "") || "work-aid";
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${filename}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
   function renderWorkAid(workAid) {
     if (!workAid) {
       els.workAid.classList.remove("visible");
@@ -497,6 +536,18 @@
     badge.textContent = "Work aid";
     header.appendChild(badge);
     header.appendChild(document.createTextNode(workAid.title));
+
+    const spacer = document.createElement("span");
+    spacer.className = "header-spacer";
+    header.appendChild(spacer);
+
+    const downloadBtn = document.createElement("button");
+    downloadBtn.className = "download-btn";
+    downloadBtn.type = "button";
+    downloadBtn.textContent = "Download";
+    downloadBtn.addEventListener("click", () => downloadWorkAid(workAid));
+    header.appendChild(downloadBtn);
+
     els.workAid.appendChild(header);
 
     const body = document.createElement("div");
